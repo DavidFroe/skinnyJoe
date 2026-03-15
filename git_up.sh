@@ -1,7 +1,35 @@
 #!/bin/bash
-echo "🚀 Starte Upload (Server wird plattgemacht)..."
-BRANCH=$(git branch --show-current)
+# ================================================================
+# SkinnyJoe Git Upload — Push lokalen Stand zu GitHub
+# ================================================================
+
+set -e
+cd "$(dirname "$(readlink -f "$0")")"
+
+echo "🚀 SkinnyJoe Git Upload"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+BRANCH="main"
+git checkout main 2>/dev/null || true
+
+chmod +x *.sh 2>/dev/null || true
+
 git add -A
-git commit -m "Auto-Sync: $(date +'%Y-%m-%d %H:%M:%S')"
+
+CHANGES=$(git diff --cached --stat)
+if [ -z "$CHANGES" ]; then
+    echo "ℹ️  Keine Änderungen zum Hochladen."
+    exit 0
+fi
+
+echo "📋 Änderungen:"
+echo "$CHANGES"
+echo ""
+
+MSG="SkinnyJoe Sync: $(date +'%Y-%m-%d %H:%M:%S')"
+git commit -m "$MSG"
 git push origin "$BRANCH" --force
-echo "✅ Upload erledigt!"
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "✅ Upload auf 'main' erledigt!"
