@@ -388,6 +388,98 @@ def _ask_image(prompt, base_url):
         print(f"{C_RED}Fehler: {e}{C_RESET}", file=sys.stderr)
 
 
+def cmd_resources():
+    """Zeigt RAM, VRAM, CPU/GPU-Auslastung und welche Modelle wo liegen."""
+    import subprocess, shutil
+
+    print(f"\n  {C_BOLD}SkinnyJoe Ressourcen{C_RESET}")
+    print(f"  {'─' * 60}")
+
+    # --- RAM ---
+    try:
+        with open("/proc/meminfo") as f:
+            mem = {}
+            for line in f:
+                k, v = line.split(":")
+                mem[k.strip()] = int(v.strip().split()[0])  # kB
+        total = mem["MemTotal"] / 1024 / 1024
+        avail = mem["MemAvailable"] / 1024 / 1024
+        used  = total - avail
+        pct   = used / total * 100
+        bar   = _bar(pct, 24)
+        bc    = C_RED if pct > 85 else C_YELLOW if pct > 60 else C_GREEN
+        print(f"\n  {C_BOLD}RAM{C_RESET}")
+        print(f"    Gesamt: {total:.1f} GB   Belegt: {used:.1f} GB   Frei: {avail:.1f} GB")
+        print(f"    {bc}{bar}{C_RESET}  {pct:.0f}%")
+    except Exception as e:
+        print(f"  RAM: {C_RED}Fehler: {e}{C_RESET}")
+
+    # --- CPU ---
+    try:
+        load1, load5, _ = open("/proc/loadavg").read().split()[:3]
+        cpu_count = os.cpu_count() or 1
+        pct_load  = float(load1) / cpu_count * 100
+        bc = C_RED if pct_load > 85 else C_YELLOW if pct_load > 50 else C_GREEN
+        print(f"\n  {C_BOLD}CPU{C_RESET}  ({cpu_count} Kerne)")
+        print(f"    Load: {load1} / {load5} (1m / 5m)   {bc}{pct_load:.0f}% Auslastung{C_RESET}")
+    except Exception as e:
+        print(f"  CPU: {C_RED}Fehler: {e}{C_RESET}")
+
+    # --- VRAM (nvidia-smi) ---
+    if shutil.which("nvidia-smi"):
+        try:
+            out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=index,name,memory.used,memory.total,utilization.gpu",
+                 "--format=csv,noheader,nounits"],
+                text=True, stderr=subprocess.DEVNULL
+            )
+            print(f"\n  {C_BOLD}NVIDIA GPUs (VRAM){C_RESET}")
+            for line in out.strip().splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) < 5: continue
+                idx, name, used_mb, total_mb, util = parts
+                used_gb  = int(used_mb) / 1024
+                total_gb = int(total_mb) / 1024
+                pct_vram = int(used_mb) / int(total_mb) * 100
+                pct_util = int(util)
+                bv = _bar(pct_vram, 20)
+                bu = _bar(pct_util, 10)
+                cv = C_RED if pct_vram > 85 else C_YELLOW if pct_vram > 60 else C_GREEN
+                cu = C_RED if pct_util > 85 else C_YELLOW if pct_util > 50 else C_GREEN
+                print(f"    G{idx}  {name}")
+                print(f"       VRAM: {cv}{bv}{C_RESET} {used_gb:.1f}/{total_gb:.1f} GB ({pct_vram:.0f}%)")
+                print(f"       Kern: {cu}{bu}{C_RESET} {pct_util}%")
+        except Exception as e:
+            print(f"  GPU: {C_RED}nvidia-smi Fehler: {e}{C_RESET}")
+    else:
+        print(f"\n  GPUs: {C_DIM}nvidia-smi nicht verfügbar{C_RESET}")
+
+    # --- Geladene Modelle ---
+    try:
+        slots_data = api_get(MGMT_URL, "/v1/slots")
+        loaded = [(s["id"], s["port"], s["loaded_model"])
+                  for s in slots_data.get("slots", []) if s.get("loaded_model")]
+        if loaded:
+            print(f"\n  {C_BOLD}Geladene Modelle{C_RESET}")
+            for sid, port, m in loaded:
+                mtype  = m.get("model_type", "?")
+                size   = m.get("size_gb", 0)
+                tcolor = TYPE_COLORS.get(mtype, C_WHITE)
+                print(f"    Slot {C_CYAN}{sid}{C_RESET} (:{port}): {tcolor}{m['name']}{C_RESET}")
+                print(f"             {mtype}  ·  {size:.1f} GB")
+        else:
+            print(f"\n  {C_DIM}Keine Modelle geladen.{C_RESET}")
+    except Exception:
+        pass
+
+    print(f"\n  {'─' * 60}\n")
+
+
+def _bar(pct, width=20):
+    filled = int(width * min(pct, 100) / 100)
+    return "█" * filled + "░" * (width - filled)
+
+
 def cmd_bench(sizes, max_gen, slot_id):
     slot_base = _slot_url(slot_id)
     s = api_get(slot_base, "/status")
@@ -664,6 +756,7 @@ def cmd_help():
   {C_BOLD}System:{C_RESET}
     sj gpus                         NVIDIA GPUs anzeigen
     sj status                       Gesamtstatus
+    sj resources                    RAM/VRAM/CPU/GPU-Auslastung + geladene Modelle
     sj bench --slot 1               Benchmark auf Slot 1
     sj tui                          {C_CYAN}Interaktive TUI{C_RESET}
 
@@ -704,6 +797,7 @@ def main():
     sub.add_parser("slots")
     sub.add_parser("gpus")
     sub.add_parser("status")
+    sub.add_parser("resources")
     sub.add_parser("tui")
     sub.add_parser("kill")
 
@@ -737,7 +831,7 @@ def main():
         cmd_help(); sys.exit(0)
 
     cmds = {"help": cmd_help, "models": cmd_models, "slots": cmd_slots, "gpus": cmd_gpus,
-            "status": cmd_status, "kill": cmd_kill, "tui": cmd_tui}
+            "status": cmd_status, "resources": cmd_resources, "kill": cmd_kill, "tui": cmd_tui}
     if args.command in cmds:
         cmds[args.command]()
     elif args.command == "load":
