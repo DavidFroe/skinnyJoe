@@ -1,0 +1,111 @@
+# lmsmodel v1.0 - REST API Gateway Spezifikation
+
+## Schnellstart (3 Schritte)
+```bash
+# 1. Server starten
+python lmsmodel.py server start
+
+# 2. Modell einmalig setzen (z.B. Model ID 14, Modus: fire-and-forget-repeating)
+curl -X POST http://127.0.0.1:5050/api/v1/model/set \
+  -H "Content-Type: application/json" \
+  -d '{"model_id": 14, "mode": "fafr"}'
+
+# 3. Einfach Fragen stellen — fertig!
+curl -X POST http://127.0.0.1:5050/api/v1/ask \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Was ist Python?"}'
+```
+Ab jetzt reicht immer nur noch Schritt 3. Modell wechseln? Schritt 2 nochmal.
+
+---
+
+## Server-Management (CLI)
+```bash
+python lmsmodel.py server start              # Daemon starten (Port 5050)
+python lmsmodel.py server start --port 8080  # Anderer Port
+python lmsmodel.py server stop               # Stoppen
+python lmsmodel.py server restart            # Neustart
+python lmsmodel.py server status             # Status + letzte Logs
+python lmsmodel.py server log                # Live-Log (tail -f)
+```
+
+---
+
+## API Endpunkte
+
+### GET /api/v1/status
+Health Check. Zeigt ob der Server läuft, welches Modell aktiv ist und welcher Modus.
+```json
+{"status": "success", "active_model_id": 14, "active_mode": "fafr"}
+```
+
+### GET /api/v1/models
+Liste aller registrierten Modelle mit auto-generierten Konfigurationen (Größe, Timeout).
+
+### POST /api/v1/model/set
+Setzt das aktive Modell + Modus. Lädt es in den VRAM und erstellt ggf. eine Config.
+```json
+{"model_id": 14, "mode": "fafr"}
+```
+Verfügbare Modi: `faf`, `fafr` (default), `assistent`, `demon`
+
+### GET /api/v1/model/active
+Zeigt das aktuell gesetzte Modell, den Modus und die Konfiguration.
+
+### POST /api/v1/ask  ⭐ EINFACHSTER ENDPUNKT
+Nur Prompt senden → Antwort bekommen. Nutzt automatisch das gesetzte Modell + Modus.
+```json
+{"prompt": "Was ist Python?"}
+```
+Antwort:
+```json
+{"response": "Python is a high-level programming language..."}
+```
+
+### POST /api/v1/infer
+Wie /ask, aber mit mehr Kontrolle (Model ID, Modus, System Prompt überschreibbar).
+```json
+{"model_id": 14, "prompt": "...", "mode": "fafr", "system_prompt": "..."}
+```
+
+---
+
+## Modell-Konfigurationen
+Configs: `~/.lmsmodel/configs/<ID>.json` (auto-generiert beim ersten Laden).
+
+| Modellgröße | stability_timeout |
+|-------------|-------------------|
+| ≤ 10B       | 1.5s              |
+| ≤ 30B       | 5.0s              |
+| ≤ 70B       | 10.0s             |
+| > 70B       | 15.0s             |
+
+Config manuell anpassen:
+```bash
+python lmsmodel.py config <ID> <key> <value>
+python lmsmodel.py config <ID> show
+```
+
+---
+
+## Nutzung von anderen Geräten
+Der Server lauscht auf allen Interfaces. Von einem anderen Gerät im Netzwerk:
+```bash
+# Modell setzen
+curl -X POST http://10.0.0.X:5050/api/v1/model/set \
+  -H "Content-Type: application/json" \
+  -d '{"model_id": 14}'
+
+# Fragen stellen
+curl -X POST http://10.0.0.X:5050/api/v1/ask \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Erkläre mir Quantencomputer"}'
+```
+
+## Test-Script
+```bash
+python api_test.py                          # Status + Modell-Liste
+python api_test.py --set 14                 # Modell setzen
+python api_test.py --infer-active           # Inferenz mit aktivem Modell
+python api_test.py --all 14 --prompt "Hi"   # Setzen + Inferenz
+```

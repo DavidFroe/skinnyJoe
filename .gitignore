@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+install_debug.log
+response.jpg
+response.json
+debug_*.json
+models/
+*.gguf
+*.safetensors
+*.bin

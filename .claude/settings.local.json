@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep:*)",
+      "Bash(wc:*)",
+      "Bash(python3:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(lspci:*)",
+      "Bash(rocm-smi:*)",
+      "Bash(rocminfo:*)",
+      "Bash(/home/david/skinnyjoe/venv/bin/pip list:*)",
+      "Read(//home/david/.local/bin/**)",
+      "Read(//var/home/david/.local/bin/**)",
+      "Bash(pip show:*)",
+      "Bash(find /var/home/david/skinnyjoe -type f -name \"*\" 2>/dev/null | head -50)",
+      "Bash(ls -1 /var/home/david/skinnyjoe/models/*.gguf /var/home/david/skinnyjoe/models/*.safetensors 2>/dev/null | while read f; do basename \"$f\" .gguf | sed 's/\\\\.safetensors$//'; done | sort)",
+      "Bash(git init:*)",
+      "Bash(git fetch:*)",
+      "Bash(cat:*)",
+      "Bash(git checkout:*)"
+    ]
+  }
+}

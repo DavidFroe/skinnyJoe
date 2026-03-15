@@ -1,0 +1,542 @@
+================================================================================
+  SkinnyJoe External Interface v4.0 – Schnittstellenbeschreibung
+================================================================================
+
+ÜBERSICHT
+---------
+SkinnyJoe ist ein Multi-Slot Model-Server. Er stellt N unabhängige Slots
+bereit (Standard: 4), jeder auf einem eigenen TCP-Port. Jeder Slot kann
+ein KI-Modell laden und bietet eine OpenAI-kompatible REST-API.
+
+Die Verwaltung (Modelle auflisten, laden, entladen) erfolgt über einen
+separaten Management-Port. Die Model-Konfiguration (GPU, Kontextfenster,
+etc.) ist serverseitig fest in config.json definiert.
+
+Von aussen wird nur gesteuert:
+  - WELCHES Modell auf WELCHEN Slot geladen wird
+  - Inference-Anfragen an geladene Slots
+
+Hardware-Konflikte (z.B. zwei Modelle brauchen die gleiche GPU) werden
+automatisch erkannt und verhindert.
+
+
+PORTS
+-----
+  Management-Port:  8000  (konfigurierbar in config.json → management_port)
+  Slot-Ports:       8001, 8002, 8003, 8004  (konfigurierbar → slots[].port)
+
+Alle Ports lauschen auf 0.0.0.0 (alle Interfaces).
+Protokoll: HTTP/1.1, JSON-Body, UTF-8
+
+
+================================================================================
+  MANAGEMENT-API (Port 8000)
+================================================================================
+
+1. VERFÜGBARE MODELLE AUFLISTEN
+   GET /v1/models
+
+   Response:
+   {
+     "data": [
+       {
+         "id": 1,
+         "name": "Qwen3-30B-A3B-Instruct",
+         "full_name": "Qwen3-30B-A3B-Instruct-2507-Q4_K_M",
+         "model_type": "text2text",
+         "format": "gguf",
+         "size_gb": 18.0,
+         "params": "30B",
+         "quant": "Q4_K_M",
+         "tags": ["instruct"],
+         "description": "Text-LLM · 30B · Instruct",
+         "has_mmproj": false,
+         "profile": {
+           "gpu_layers": -1,
+           "gpu_ids": [0],
+           "ctx": 16384,
+           "n_batch": 2048
+         }
+       },
+       ...
+     ]
+   }
+
+   Modell-Typen:
+     "text2text"   – LLM für Chat/Completion
+     "image2text"  – Vision-Modell (Bild → Text)
+     "text2image"  – Diffusion-Modell (Text → Bild)
+
+
+2. SLOTS ANZEIGEN
+   GET /v1/slots
+
+   Response:
+   {
+     "slots": [
+       {
+         "id": 1,
+         "port": 8001,
+         "status": "idle",
+         "loaded_model": null
+       },
+       {
+         "id": 2,
+         "port": 8002,
+         "status": "loaded",
+         "loaded_model": {
+           "id": 5,
+           "name": "Hermes-2-Pro-Llama-3-8B",
+           "model_type": "text2text",
+           "size_gb": 5.4
+         }
+       }
+     ]
+   }
+
+   Status-Werte:
+     "idle"        – Kein Modell geladen, bereit
+     "loaded"      – Modell geladen, bereit für Inference
+     "generating"  – Modell generiert gerade (busy)
+
+
+3. MODELL IN SLOT LADEN
+   POST /v1/load
+   Content-Type: application/json
+
+   Request:
+   {
+     "slot_id": 1,
+     "model_id": 5
+   }
+
+   Erfolg-Response (200):
+   {
+     "status": "loaded",
+     "slot_id": 1,
+     "model": {
+       "id": 5,
+       "name": "Hermes-2-Pro-Llama-3-8B",
+       "model_type": "text2text",
+       "size_gb": 5.4
+     },
+     "profile": {
+       "gpu_layers": -1,
+       "gpu_ids": [0],
+       "ctx": 4096,
+       "n_batch": 1024
+     }
+   }
+
+   Fehler – Hardware-Konflikt (409):
+   {
+     "detail": "Hardware-Konflikt: GPU G0 belegt von Slot 2"
+   }
+
+   Fehler – Modell nicht gefunden (404):
+   {
+     "detail": "Modell N99 nicht gefunden."
+   }
+
+   Fehler – Slot generiert gerade (409):
+   {
+     "detail": "Slot 1 generiert gerade."
+   }
+
+   HINWEIS: Wenn der Slot bereits ein Modell geladen hat, wird dieses
+   automatisch entladen bevor das neue Modell geladen wird. Die
+   Hardware-Ressourcen des alten Modells werden freigegeben.
+
+   HINWEIS: Das Laden kann je nach Modellgröße mehrere Minuten dauern.
+   Der HTTP-Request blockiert bis das Modell geladen ist. Setze einen
+   ausreichend langen Timeout (mindestens 300 Sekunden).
+
+
+4. MODELL AUS SLOT ENTLADEN
+   POST /v1/unload
+   Content-Type: application/json
+
+   Request:
+   {
+     "slot_id": 1
+   }
+
+   Response (200):
+   {
+     "status": "unloaded",
+     "slot_id": 1
+   }
+
+
+5. GPUS ANZEIGEN
+   GET /v1/gpus
+
+   Response:
+   {
+     "gpus": [
+       {
+         "id": 0,
+         "name": "NVIDIA GeForce RTX 3080",
+         "vram_total_gb": 20.0,
+         "vram_free_gb": 18.2,
+         "vram_used_gb": 1.8
+       }
+     ],
+     "count": 1
+   }
+
+   Wenn keine NVIDIA GPU erkannt wird: {"gpus": [], "count": 0}
+
+
+6. MODELLE NEU SCANNEN
+   POST /v1/rescan
+
+   Response:
+   {
+     "status": "rescanned",
+     "count": 15
+   }
+
+
+7. PROFILE ANZEIGEN
+   GET /v1/profiles
+
+   Response:
+   {
+     "profiles": [
+       {
+         "name": "coding",
+         "slot_id": 1,
+         "model_name": "DeepSeek-Coder-V2-Lite-Instruct-Q5_K_S",
+         "model_id": 7,
+         "model_found": "DeepSeek-Coder-V2-Lite-Instruct",
+         "description": "Coding-Assistent auf Slot 1 (GPU)"
+       },
+       ...
+     ]
+   }
+
+   Profile sind benannte Shortcuts: Name → Slot + Modell.
+   "model_id" ist null wenn das Modell nicht im models_dir gefunden wird.
+
+
+8. PROFIL LADEN
+   POST /v1/load-profile
+   Content-Type: application/json
+
+   Request:
+   {
+     "profile": "coding"
+   }
+
+   Response (200): Gleich wie POST /v1/load
+
+   Fehler – Profil unbekannt (404):
+   {
+     "detail": "Profil 'xyz' nicht gefunden. Verfügbar: ['coding', 'chat', ...]"
+   }
+
+   Fehler – Modell aus Profil nicht gefunden (404):
+   {
+     "detail": "Modell 'XYZ' aus Profil 'coding' nicht im models_dir gefunden."
+   }
+
+   HINWEIS: Profile werden in config.json unter "profiles" konfiguriert.
+   Damit kann owlAPI per Name ein Preset laden ohne Model-IDs zu kennen.
+
+
+9. GESAMTSTATUS
+   GET /status
+
+   Response:
+   {
+     "management_port": 8000,
+     "slots": [ ... ],
+     "gpus": [ ... ],
+     "models_count": 15,
+     "hardware_alloc": {
+       "G0": "Slot 1"
+     }
+   }
+
+
+================================================================================
+  SLOT-API (Port 8001-8004) – OpenAI-kompatibel
+================================================================================
+
+Jeder Slot-Port bietet eine eigenständige OpenAI-kompatible API.
+Der Slot verhält sich wie ein unabhängiger Model-Server.
+
+Voraussetzung: Ein Modell muss über die Management-API (Port 8000)
+in den Slot geladen worden sein.
+
+
+1. CHAT COMPLETION (text2text / image2text Modelle)
+   POST /v1/chat/completions
+   Content-Type: application/json
+
+   Request (Text):
+   {
+     "messages": [
+       {"role": "system", "content": "Du bist ein hilfreicher Assistent."},
+       {"role": "user", "content": "Was ist Python?"}
+     ],
+     "max_tokens": 1024,
+     "temperature": 0.7,
+     "top_p": 0.9,
+     "stream": true
+   }
+
+   Request (Vision – image2text Modell mit Bild):
+   {
+     "messages": [
+       {
+         "role": "user",
+         "content": [
+           {
+             "type": "image_url",
+             "image_url": {
+               "url": "data:image/jpeg;base64,/9j/4AAQ..."
+             }
+           },
+           {
+             "type": "text",
+             "text": "Beschreibe dieses Bild."
+           }
+         ]
+       }
+     ],
+     "max_tokens": 512,
+     "stream": true
+   }
+
+   Streaming-Response (stream: true):
+     Content-Type: text/event-stream
+
+     data: {"choices":[{"delta":{"content":"Python"},"index":0}]}
+     data: {"choices":[{"delta":{"content":" ist"},"index":0}]}
+     data: {"choices":[{"delta":{"content":" eine"},"index":0}]}
+     ...
+     data: [DONE]
+
+   Nicht-Streaming-Response (stream: false):
+   {
+     "choices": [
+       {
+         "message": {
+           "role": "assistant",
+           "content": "Python ist eine Programmiersprache..."
+         },
+         "index": 0,
+         "finish_reason": "stop"
+       }
+     ],
+     "usage": {
+       "prompt_tokens": 20,
+       "completion_tokens": 150,
+       "total_tokens": 170
+     }
+   }
+
+   Optionale Parameter:
+     temperature     float  (0.0 - 2.0, default aus config)
+     max_tokens      int    (default aus config)
+     top_p           float  (0.0 - 1.0)
+     top_k           int    (1 - 100)
+     repeat_penalty  float  (1.0 - 2.0)
+     stream          bool   (true für SSE-Streaming)
+
+
+2. BILDGENERIERUNG (text2image Modelle)
+   POST /v1/images/generations
+   Content-Type: application/json
+
+   Request:
+   {
+     "prompt": "A cat sitting on a rainbow in space",
+     "width": 1024,
+     "height": 1024,
+     "num_inference_steps": 20,
+     "guidance_scale": 3.5
+   }
+
+   Response:
+   {
+     "created": 1710000000,
+     "data": [
+       {
+         "b64_json": "/9j/4AAQSkZJRg...",
+         "revised_prompt": "A cat sitting on a rainbow in space"
+       }
+     ]
+   }
+
+   Das Bild wird als Base64-kodiertes JPEG zurückgegeben.
+
+
+3. GELADENES MODELL ANZEIGEN
+   GET /v1/models
+
+   Response (Modell geladen):
+   {
+     "data": [
+       {
+         "id": 5,
+         "name": "Hermes-2-Pro-Llama-3-8B",
+         "model_type": "text2text",
+         "loaded": true
+       }
+     ]
+   }
+
+   Response (kein Modell):
+   {
+     "data": []
+   }
+
+
+4. SLOT-STATUS
+   GET /status
+
+   Response:
+   {
+     "slot_id": 1,
+     "port": 8001,
+     "loaded_model": {
+       "id": 5,
+       "name": "Hermes-2-Pro-Llama-3-8B",
+       "model_type": "text2text",
+       "size_gb": 5.4
+     },
+     "is_generating": false
+   }
+
+
+================================================================================
+  HARDWARE-KONFLIKTE
+================================================================================
+
+Jedes Modell hat ein festes Profil in config.json das bestimmt, welche
+Hardware es benötigt (gpu_ids, gpu_layers).
+
+Konflikt-Regel:
+  Zwei Modelle die mindestens eine gemeinsame GPU-ID haben, können NICHT
+  gleichzeitig auf verschiedenen Slots geladen sein.
+
+Beispiele:
+  - Modell A: gpu_ids=[0], Modell B: gpu_ids=[0]
+    → KONFLIKT: Beide brauchen GPU G0
+    → B kann nicht geladen werden solange A geladen ist
+
+  - Modell A: gpu_ids=[0], Modell B: gpu_ids=[1]
+    → KEIN KONFLIKT: Verschiedene GPUs
+
+  - Modell A: gpu_ids=[0], Modell B: gpu_ids=[]
+    → KEIN KONFLIKT: B ist CPU-only
+
+  - Modell A: gpu_ids=[], Modell B: gpu_ids=[]
+    → KEIN KONFLIKT: Beide CPU-only, können parallel laufen
+
+Beim Laden wird automatisch geprüft ob Konflikte bestehen. Bei Konflikt
+wird HTTP 409 mit Details zurückgegeben.
+
+Um ein blockierendes Modell zu ersetzen: Erst den blockierenden Slot
+entladen, dann das neue Modell laden.
+
+
+================================================================================
+  TYPISCHER WORKFLOW (direkt)
+================================================================================
+
+1. Verfügbare Modelle abfragen:
+   GET http://host:8000/v1/models
+
+2. Slots prüfen:
+   GET http://host:8000/v1/slots
+
+3a. Modell per ID in Slot laden:
+   POST http://host:8000/v1/load
+   {"slot_id": 1, "model_id": 5}
+
+3b. Modell per Profil-Name laden:
+   POST http://host:8000/v1/load-profile
+   {"profile": "coding"}
+
+4. Inference über Slot-Port:
+   POST http://host:8001/v1/chat/completions
+   {"messages": [{"role": "user", "content": "Hallo"}], "stream": true}
+
+5. Anderes Modell in anderen Slot laden (falls kein Konflikt):
+   POST http://host:8000/v1/load
+   {"slot_id": 2, "model_id": 12}
+
+6. Slot entladen wenn nicht mehr benötigt:
+   POST http://host:8000/v1/unload
+   {"slot_id": 1}
+
+
+================================================================================
+  OWLAPI PROXY-ENDPUNKTE (Port 4040)
+================================================================================
+
+owlAPI leitet folgende Anfragen direkt an SkinnyJoe weiter:
+
+  GET  /skinnyjoe/models          → Alle SkinnyJoe-Modelle mit Slot-Status
+  GET  /skinnyjoe/slots           → Slot-Übersicht
+  GET  /skinnyjoe/profiles        → Benannte Profile
+  POST /skinnyjoe/load            → Modell laden {slot_id, model_id}
+  POST /skinnyjoe/unload          → Modell entladen {slot_id}
+  POST /skinnyjoe/load-profile    → Profil laden {profile: "name"}
+
+SkinnyJoe-Modelle erscheinen auch in /models (owlAPI) mit:
+  provider:       "skinnyJoe"
+  status_override: "NICHT GELADEN" wenn kein Slot zugewiesen
+  _sj_slot_port:  Port des zugewiesenen Slots (nur wenn geladen)
+
+owlAPI routet Inference automatisch zum richtigen Slot-Port.
+
+
+================================================================================
+  FEHLER-CODES
+================================================================================
+
+  200  OK                – Anfrage erfolgreich
+  400  Bad Request       – Fehlende Parameter oder kein Modell geladen
+  404  Not Found         – Slot oder Modell nicht gefunden
+  409  Conflict          – Hardware-Konflikt oder Generierung läuft
+  500  Internal Error    – Server-Fehler (z.B. Modell-Laden fehlgeschlagen)
+
+Fehler-Format:
+  {"detail": "Beschreibung des Fehlers"}
+
+
+================================================================================
+  KONFIGURATION (config.json)
+================================================================================
+
+Die Hardware-Zuordnung wird serverseitig in config.json unter
+"model_profiles" konfiguriert. Jeder Eintrag ist nach dem Dateinamen
+des Modells (ohne Erweiterung) benannt.
+
+Profil-Parameter:
+  gpu_layers    int       0=CPU, -1=alle Layer auf GPU, N=N Layer auf GPU
+  gpu_ids       [int]     Welche GPUs das Modell nutzt, z.B. [0] oder [0,1]
+  ctx           int       Kontextfenstergröße in Tokens
+  n_batch       int       Batch-Größe für Prompt-Evaluation
+  n_threads     int       CPU-Threads
+  flash_attn    bool      Flash Attention aktivieren
+
+Modelle ohne Profil nutzen die globalen Defaults.
+
+Slot-Konfiguration:
+  "slots": [
+    {"id": 1, "port": 8001},
+    {"id": 2, "port": 8002},
+    {"id": 3, "port": 8003},
+    {"id": 4, "port": 8004}
+  ]
+
+Anzahl und Ports der Slots sind frei konfigurierbar (1-N).
+
+
+================================================================================

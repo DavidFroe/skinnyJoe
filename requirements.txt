@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+pydantic
+llama-cpp-python
+requests
+
+# Image Generation (Flux / Stable Diffusion)
+torch
+diffusers
+transformers
+accelerate
+safetensors
+sentencepiece
+
+# Image Handling (Vision)
+Pillow
