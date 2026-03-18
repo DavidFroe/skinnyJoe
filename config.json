@@ -6,11 +6,11 @@
         {"id": 3, "port": 8003},
         {"id": 4, "port": 8004}
     ],
-    "models_dir": "/home/david/skinnyjoe/models",
+    "models_dir": "/home/models/skinnyJoe",
     "ram_budget_gb": 50.0,
     "defaults": {
         "temperature": 0.9,
-        "max_tokens": 16384,
+        "max_tokens": 32768,
         "top_p": 0.9,
         "top_k": 40,
         "repeat_penalty": 1.03,
@@ -30,32 +30,32 @@
     },
     "model_profiles": {
         "Qwen3-Coder-Next-Q4_K_M": {
-            "gpu_layers": 0,
-            "gpu_ids": [],
-            "ctx": 8192,
-            "n_batch": 2048,
+            "gpu_layers": 40,
+            "gpu_ids": [0, 1],
+            "ctx": 16384,
+            "n_batch": 1024,
             "n_threads": 8,
-            "_info": "46GB Code-LLM – zu gross fuer 20GB VRAM, CPU-only"
+            "_info": "45GB Coder – 40/48 Schichten Dual-GPU (2x RTX 3080), Rest CPU"
         },
         "Midnight-Miqu-103B-v1.0.Q3_K_S": {
-            "gpu_layers": 0,
-            "gpu_ids": [],
+            "gpu_layers": 100,
+            "gpu_ids": [0, 1],
             "ctx": 4096,
-            "n_batch": 512,
+            "n_batch": 1024,
             "n_threads": 8,
-            "_info": "42GB 103B Allround – CPU-only (zu gross fuer GPU)"
+            "_info": "42GB 103B – 100/120 Layer Dual-GPU (OOM bei 105), ~20 Layer CPU"
         },
         "Qwen3-30B-A3B-Instruct-2507-Q4_K_M": {
             "gpu_layers": -1,
             "gpu_ids": [0],
-            "ctx": 16384,
+            "ctx": 64000,
             "n_batch": 2048,
             "_info": "18GB MoE Instruct – passt auf RTX 3080 20GB"
         },
         "GLM-4.7-Flash-Uncen-Hrt-NEO-CODE-MAX-imat-D_AU-Q4_K_S": {
             "gpu_layers": -1,
             "gpu_ids": [0],
-            "ctx": 16384,
+            "ctx": 32000,
             "n_batch": 2048,
             "_info": "17GB Code/Uncensored – passt auf RTX 3080 20GB"
         },
@@ -139,6 +139,28 @@
         "fluxedUpFluxNSFW_71FP16(3)": {
             "gpu_ids": [0],
             "_info": "23GB Flux Diffusion – braucht GPU, CPU-offload aktiv"
+        },
+        "small": {
+            "device": "cpu",
+            "_info": "Whisper Small – 462MB STT, CPU"
+        },
+        "medium": {
+            "device": "cpu",
+            "_info": "Whisper Medium – 1.5GB STT, CPU"
+        },
+        "large-v3": {
+            "device": "cpu",
+            "_info": "Whisper Large-v3 – 2.9GB STT, CPU"
+        },
+        "fish-speech-1.5": {
+            "gpu_ids": [0],
+            "device": "cuda",
+            "_info": "Fish Speech 1.5 – 1.4GB TTS, GPU G0"
+        },
+        "CosyVoice2-0.5B": {
+            "gpu_ids": [0],
+            "device": "cuda",
+            "_info": "CosyVoice2 0.5B – 4.6GB TTS, GPU G0"
         }
     },
     "profiles": {

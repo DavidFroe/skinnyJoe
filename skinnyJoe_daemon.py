@@ -43,6 +43,25 @@ logger = logging.getLogger("SkinnyJoe")
 MODEL_TYPE_TEXT2TEXT = "text2text"
 MODEL_TYPE_TEXT2IMAGE = "text2image"
 MODEL_TYPE_IMAGE2TEXT = "image2text"
+MODEL_TYPE_SPEECH2TEXT = "speech2text"
+MODEL_TYPE_TEXT2SPEECH = "text2speech"
+
+# Typ-Kürzel für Model-IDs: T=Text2Text, D=Bild2Text, B=Bild, W=Whisper, S=Sprache
+TYPE_PREFIXES = {
+    "text2text":   "T",
+    "image2text":  "D",
+    "text2image":  "B",
+    "speech2text": "W",
+    "text2speech": "S",
+}
+
+KNOWN_TYPE_DIRS = {
+    "text2text": MODEL_TYPE_TEXT2TEXT,
+    "image2text": MODEL_TYPE_IMAGE2TEXT,
+    "text2image": MODEL_TYPE_TEXT2IMAGE,
+    "speech2text": MODEL_TYPE_SPEECH2TEXT,
+    "text2speech": MODEL_TYPE_TEXT2SPEECH,
+}
 
 VISION_PATTERNS = [
     re.compile(r'llava', re.IGNORECASE),
@@ -83,7 +102,7 @@ class GpuInfo(BaseModel):
     vram_used_gb: float
 
 class ModelInfo(BaseModel):
-    id: int
+    id: str
     name: str
     full_name: str
     path: str
@@ -123,7 +142,8 @@ class ImageRequest(BaseModel):
 
 class ExtLoadRequest(BaseModel):
     slot_id: int
-    model_id: int
+    model_id: str
+    ctx: Optional[int] = None  # override context size from profile
 
 class ExtUnloadRequest(BaseModel):
     slot_id: int
@@ -211,45 +231,94 @@ def _pair_mmproj(stem, mmproj_files):
         if s > best_s: best, best_s = mp, s
     return str(best) if best and best_s >= 4 else None
 
-def scan_models(models_dir):
+def _collect_model_files(base_dir: Path):
+    """Sammelt Modelldateien aus Top-Level und Typ-Unterverzeichnissen.
+    Gibt Liste von (path, forced_type_or_None) zurück."""
+    entries = []
+    for e in sorted(base_dir.iterdir()):
+        if e.is_file():
+            entries.append((e, None))
+        elif e.is_dir():
+            if e.name in KNOWN_TYPE_DIRS:
+                forced = KNOWN_TYPE_DIRS[e.name]
+                for f in sorted(e.iterdir()):
+                    if f.is_file():
+                        entries.append((f, forced))
+                    elif f.is_dir() and (
+                        (f / "model_index.json").exists()   # diffusers
+                        or (f / "config.json").exists()     # TTS / HF models
+                        or forced == MODEL_TYPE_TEXT2SPEECH  # always include text2speech dirs
+                    ):
+                        entries.append((f, forced))
+            elif (e / "model_index.json").exists():
+                entries.append((e, None))
+    return entries
+
+
+def scan_models(models_dir, speech_backends=None):
     mp = Path(models_dir)
     if not mp.exists(): return []
-    mmproj_files, model_files = [], []
-    for e in sorted(mp.iterdir()):
-        if e.is_file():
-            ext = e.suffix.lower()
-            if ext == '.gguf':
-                (mmproj_files if _is_mmproj(e.name) else model_files).append(e)
-            elif ext == '.safetensors':
-                model_files.append(e)
-        elif e.is_dir() and (e / "model_index.json").exists():
-            model_files.append(e)
+
+    entries = _collect_model_files(mp)
+
+    # Separate mmproj files from model files
+    mmproj_files = []
+    model_entries = []
+    for e, forced_type in entries:
+        if e.is_file() and e.suffix.lower() == '.gguf' and _is_mmproj(e.name):
+            mmproj_files.append(e)
+        else:
+            model_entries.append((e, forced_type))
 
     models, idx = [], 1
-    for e in model_files:
+    for e, forced_type in model_entries:
         if e.is_dir():
             sz = round(sum(f.stat().st_size for f in e.rglob("*") if f.is_file()) / (1024**3), 2)
-            models.append(ModelInfo(id=idx, name=e.name[:35], full_name=e.name, path=str(e),
-                format="diffusers", model_type=MODEL_TYPE_TEXT2IMAGE, size_gb=sz,
-                description="Diffusion Pipeline (Text→Bild)"))
+            mt = forced_type or MODEL_TYPE_TEXT2IMAGE
+            fmt = "tts" if mt == MODEL_TYPE_TEXT2SPEECH else "diffusers"
+            models.append(ModelInfo(id=str(idx), name=e.name[:35], full_name=e.name, path=str(e),
+                format=fmt, model_type=mt, size_gb=sz,
+                description=_make_desc(mt, [], None)))
             idx += 1; continue
 
+        ext = e.suffix.lower()
+        if ext not in ('.gguf', '.safetensors', '.bin', '.pt'):
+            continue
+
         sz = round(e.stat().st_size / (1024**3), 2)
-        stem, ext = e.stem, e.suffix.lower()
+        stem = e.stem
         tags = _extract_tags(stem)
-        if ext == '.safetensors':
+
+        # Typ-Erkennung: Unterverzeichnis überschreibt Auto-Detection
+        if forced_type:
+            mt = forced_type
+            fmt = "gguf" if ext == '.gguf' else ext.lstrip('.')
+        elif ext == '.safetensors':
             mt, fmt = MODEL_TYPE_TEXT2IMAGE, "safetensors"
         elif _is_vision(stem):
             mt, fmt = MODEL_TYPE_IMAGE2TEXT, "gguf"
             if "vision" not in tags: tags.append("vision")
         else:
             mt, fmt = MODEL_TYPE_TEXT2TEXT, "gguf"
+
         mmp = _pair_mmproj(stem, mmproj_files) if mt == MODEL_TYPE_IMAGE2TEXT else None
-        models.append(ModelInfo(id=idx, name=_clean_name(e.name), full_name=stem,
+        models.append(ModelInfo(id=str(idx), name=_clean_name(e.name), full_name=stem,
             path=str(e), format=fmt, model_type=mt, size_gb=sz,
             params=_extract_params(stem), quant=_extract_quant(stem),
             tags=tags, mmproj_path=mmp, description=_make_desc(mt, tags, _extract_params(stem))))
         idx += 1
+
+    # Virtual entries from speech_backends config
+    for backend_name, bconf in (speech_backends or {}).items():
+        engine = bconf.get("engine", "openai-whisper")
+        path = bconf.get("path", "")
+        sz = round(Path(path).stat().st_size / (1024**3), 2) if path and Path(path).exists() else 0.0
+        info_str = bconf.get("_info", f"{engine} STT backend")
+        models.append(ModelInfo(id=str(idx), name=backend_name[:35], full_name=backend_name,
+            path=path, format=engine, model_type=MODEL_TYPE_SPEECH2TEXT, size_gb=sz,
+            tags=["stt", engine], description=info_str))
+        idx += 1
+
     return models
 
 
@@ -296,6 +365,10 @@ class Slot:
         self.unload()
         if info.model_type == MODEL_TYPE_IMAGE2TEXT:
             self._load_vision(info, profile)
+        elif info.model_type == MODEL_TYPE_SPEECH2TEXT:
+            self._load_whisper(info, profile)
+        elif info.model_type == MODEL_TYPE_TEXT2SPEECH:
+            self._load_tts(info, profile)
         elif info.format == "gguf":
             self._load_gguf(info, profile)
         elif info.format in ("safetensors", "diffusers"):
@@ -371,17 +444,35 @@ class Slot:
         dtype = torch.bfloat16
         gpu_ids = profile.get("gpu_ids", [])
         device = f"cuda:{gpu_ids[0]}" if gpu_ids and torch.cuda.is_available() else "cpu"
+        local_kw = {"local_files_only": True} if info.format == "diffusers" else {}
         try:
             loader = FluxPipeline.from_pretrained if info.format == "diffusers" else FluxPipeline.from_single_file
-            pipe = loader(info.path, torch_dtype=dtype)
+            pipe = loader(info.path, torch_dtype=dtype, **local_kw)
             gid = int(device.split(":")[1]) if ":" in device else 0
             pipe.enable_model_cpu_offload(gpu_id=gid if device.startswith("cuda") else 0)
             self.model = pipe
         except Exception:
             loader = StableDiffusionPipeline.from_pretrained if info.format == "diffusers" else StableDiffusionPipeline.from_single_file
-            pipe = loader(info.path, torch_dtype=dtype)
+            pipe = loader(info.path, torch_dtype=dtype, **local_kw)
             pipe.to(device)
             self.model = pipe
+
+    def _load_whisper(self, info, profile):
+        """Whisper speech-to-text Modell laden (openai-whisper)."""
+        import whisper as oai_whisper
+        gpu_ids = profile.get("gpu_ids", [])
+        device_cfg = profile.get("device", "auto")
+        if device_cfg == "auto":
+            device = "cuda" if gpu_ids else "cpu"
+        else:
+            device = device_cfg
+        self.model = oai_whisper.load_model(info.path, device=device)
+
+    def _load_tts(self, info, profile):
+        """Text-to-Speech Modell laden – Platzhalter, Inferenz noch nicht implementiert."""
+        logger.info(f"TTS-Modell '{info.name}' erkannt ({info.full_name}). Inferenz-Backend ausstehend.")
+        # Modell-Pfad merken; eigentliche Initialisierung folgt wenn Backend gewählt ist
+        self.model = {"__tts_stub__": True, "name": info.full_name, "path": info.path}
 
     def generate_text(self, request: GenerateRequest, defaults: dict):
         if not self.model:
@@ -450,6 +541,60 @@ class Slot:
             self.is_generating = False
 
 
+def _stable_model_ids(models: list, ids_file: str) -> list:
+    """Assign stable typed IDs (T1, D2, W3, B1, S1).
+    Prefix encodes model type; number is per-type sequential.
+    Once assigned, IDs never change. Stored in model_ids.json."""
+    try:
+        with open(ids_file) as f:
+            mapping: Dict[str, str] = json.load(f)
+    except Exception:
+        mapping = {}
+
+    # Höchste vergebene Nummer pro Prefix bestimmen
+    next_n: Dict[str, int] = {}
+    for val in mapping.values():
+        if isinstance(val, str) and len(val) >= 2:
+            prefix, num = val[0], val[1:]
+            try:
+                next_n[prefix] = max(next_n.get(prefix, 0), int(num))
+            except ValueError:
+                pass
+
+    dirty = False
+    result = []
+
+    for m in models:
+        key = f"{m.model_type}:{m.full_name}"
+        if key not in mapping:
+            prefix = TYPE_PREFIXES.get(m.model_type, "X")
+            n = next_n.get(prefix, 0) + 1
+            next_n[prefix] = n
+            mapping[key] = f"{prefix}{n}"
+            dirty = True
+        new_m = ModelInfo(
+            id=mapping[key], name=m.name, full_name=m.full_name,
+            path=m.path, format=m.format, model_type=m.model_type, size_gb=m.size_gb,
+            params=m.params, quant=m.quant, tags=list(m.tags),
+            mmproj_path=m.mmproj_path, description=m.description,
+        )
+        result.append(new_m)
+
+    if dirty:
+        try:
+            with open(ids_file, "w") as f:
+                json.dump(mapping, f, indent=2)
+        except Exception as e:
+            logger.warning(f"model_ids.json konnte nicht geschrieben werden: {e}")
+
+    # Sortieren: nach Präfix-Reihenfolge, dann Nummer
+    prefix_order = {p: i for i, p in enumerate(["T", "D", "B", "W", "S"])}
+    def _sort_key(m):
+        p, n = m.id[0], m.id[1:]
+        return (prefix_order.get(p, 99), int(n) if n.isdigit() else 0)
+    return sorted(result, key=_sort_key)
+
+
 # ============================================================
 # Slot-Manager
 # ============================================================
@@ -458,6 +603,8 @@ class SlotManager:
     def __init__(self, config_path: str):
         with open(config_path) as f:
             self.config = json.load(f)
+
+        self._ids_file = os.path.join(os.path.dirname(os.path.abspath(config_path)), "model_ids.json")
 
         self.management_port = self.config.get("management_port", 8000)
         self.defaults = {"temperature": 0.8, "max_tokens": 2048, "top_p": 0.95, "top_k": 40,
@@ -473,14 +620,15 @@ class SlotManager:
             self.slots[s["id"]] = Slot(s["id"], s["port"])
 
         models_dir = self.config.get("models_dir", os.path.join(os.path.dirname(config_path), "models"))
-        self.models = scan_models(models_dir)
+        self.speech_backends = self.config.get("speech_backends", {})
+        self.models = _stable_model_ids(scan_models(models_dir, self.speech_backends), self._ids_file)
         self.gpus = detect_gpus()
         self.hardware = HardwareManager()
         self._lock = threading.Lock()
 
         logger.info(f"SlotManager: {len(self.models)} Modelle, {len(self.slots)} Slots, {len(self.gpus)} GPUs")
         for m in self.models:
-            logger.info(f"  N{m.id} {m.name} ({m.model_type}, {m.size_gb}GB)")
+            logger.info(f"  {m.id} {m.name} ({m.model_type}, {m.size_gb}GB)")
 
     def get_profile(self, full_name: str) -> dict:
         base = dict(self.defaults)
@@ -488,17 +636,17 @@ class SlotManager:
             base.update(self.profiles[full_name])
         return base
 
-    def get_model(self, model_id: int) -> Optional[ModelInfo]:
-        return next((m for m in self.models if m.id == model_id), None)
+    def get_model(self, model_id: str) -> Optional[ModelInfo]:
+        return next((m for m in self.models if m.id == model_id.upper()), None)
 
     def refresh_gpus(self):
         self.gpus = detect_gpus()
 
     def rescan(self):
         models_dir = self.config.get("models_dir", "models")
-        self.models = scan_models(models_dir)
+        self.models = _stable_model_ids(scan_models(models_dir, self.speech_backends), self._ids_file)
 
-    def load_model(self, slot_id: int, model_id: int):
+    def load_model(self, slot_id: int, model_id: str, ctx_override: Optional[int] = None):
         with self._lock:
             if slot_id not in self.slots:
                 raise HTTPException(404, f"Slot {slot_id} existiert nicht. Verfügbar: {list(self.slots.keys())}")
@@ -508,9 +656,11 @@ class SlotManager:
 
             model = self.get_model(model_id)
             if not model:
-                raise HTTPException(404, f"Modell N{model_id} nicht gefunden.")
+                raise HTTPException(404, f"Modell {model_id.upper()} nicht gefunden.")
 
             profile = self.get_profile(model.full_name)
+            if ctx_override:
+                profile["ctx"] = ctx_override
             gpu_ids = profile.get("gpu_ids", [])
 
             conflicts = self.hardware.check_conflict(gpu_ids, exclude_slot=slot_id)
@@ -597,7 +747,8 @@ def create_management_app(sm: SlotManager) -> FastAPI:
             if slot.model_info:
                 mi = slot.model_info
                 loaded = {"id": mi.id, "name": mi.name, "model_type": mi.model_type,
-                          "size_gb": mi.size_gb}
+                          "size_gb": mi.size_gb,
+                          "ctx": slot.profile.get("ctx", sm.defaults.get("ctx", 4096))}
             slots_info.append({
                 "id": slot.id, "port": slot.port,
                 "status": "generating" if slot.is_generating else ("loaded" if slot.model else "idle"),
@@ -612,7 +763,7 @@ def create_management_app(sm: SlotManager) -> FastAPI:
 
     @app.post("/v1/load")
     def load_model(request: ExtLoadRequest):
-        return sm.load_model(request.slot_id, request.model_id)
+        return sm.load_model(request.slot_id, request.model_id, ctx_override=request.ctx)
 
     @app.post("/v1/unload")
     def unload_model(request: ExtUnloadRequest):
@@ -694,6 +845,39 @@ def create_slot_app(slot: Slot, sm: SlotManager) -> FastAPI:
         if slot.model_info.model_type != MODEL_TYPE_TEXT2IMAGE:
             raise HTTPException(400, f"Slot {slot.id}: Modell ist {slot.model_info.model_type}, nicht text2image.")
         return slot.generate_image(request, sm.image_defaults)
+
+    @app.post("/v1/audio/transcriptions")
+    async def transcribe(request: Request):
+        """OpenAI-kompatible Whisper Transkription."""
+        if not slot.model or not slot.model_info:
+            raise HTTPException(400, f"Slot {slot.id}: Kein Modell geladen.")
+        if slot.model_info.model_type != MODEL_TYPE_SPEECH2TEXT:
+            raise HTTPException(400, f"Slot {slot.id}: Modell ist {slot.model_info.model_type}, nicht speech2text.")
+
+        form = await request.form()
+        audio_file = form.get("file")
+        if not audio_file:
+            raise HTTPException(400, "Kein 'file' im Request.")
+        language = form.get("language")
+
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp.write(await audio_file.read())
+            tmp_path = tmp.name
+        slot.is_generating = True
+        try:
+            result = slot.model.transcribe(tmp_path, language=language or None, fp16=False)
+            text = result["text"].strip()
+            seg_list = [{"start": round(s["start"], 2), "end": round(s["end"], 2),
+                         "text": s["text"].strip()}
+                        for s in result.get("segments", [])]
+        finally:
+            slot.is_generating = False
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return {"text": text, "language": result.get("language", ""), "segments": seg_list}
 
     @app.get("/v1/models")
     def models():
